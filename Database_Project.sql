@@ -1,8 +1,8 @@
 -- =====================================================================
 -- 1. HEADER META
 -- =====================================================================
--- Team name : TeamName
--- Members   : Member 1, Member 2, Member 3, Member 4, Member 5
+-- Team name : Group 8
+-- Members   : Cesar Lozano, Gabriel Castro, Mahamudur Daiyan, Hemal Marepalli, Patrick Sykes
 -- Course    : CS 4354 Concepts of Database Systems, Fall 2026
 -- Project   : Airport Booking Database
 -- MySQL     : 8.0.x (8.0.16+ required for CHECK constraint enforcement)
