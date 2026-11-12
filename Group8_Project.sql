@@ -1,11 +1,9 @@
--- =====================================================================
 -- 1. HEADER META
--- =====================================================================
 -- Team name : Group 8
 -- Members   : Cesar Lozano, Gabriel Castro, Mahamudur Daiyan, Hemal Marepalli, Patrick Sykes
 -- Course    : CS 4354 Concepts of Database Systems, Fall 2026
 -- Project   : Airport Booking Database
--- MySQL     : 8.0.x (8.0.16+ required for CHECK constraint enforcement)
+-- MySQL     : 8.4.13 (8.0.16+ required for CHECK constraint enforcement)
 -- Run       : mysql -u <user> -p < Group8_Project.sql
 --             (or open in MySQL Workbench and Execute All)
 --
@@ -13,29 +11,26 @@
 --   R1  A flight's origin and destination airports must differ, and its
 --       scheduled arrival must be after its scheduled departure.
 --   R2  A passenger can hold many bookings; each booking has one or more
---       ordered flight segments.
+--       flight segments numbered 1..n with no gaps, where each leg departs
+--       after the booking was made, from the airport the previous leg
+--       arrived at, and after the previous leg lands.
 --   R3  A seat on a given flight can be assigned to at most one passenger.
 --   R4  The number of segments booked on a flight cannot exceed the
 --       capacity of the aircraft assigned to it.
 --   R5  Users can search flights by origin, destination, and date.
--- =====================================================================
 
 
--- =====================================================================
 -- 2. SESSION SETUP
--- =====================================================================
 SET sql_mode = 'STRICT_TRANS_TABLES,ONLY_FULL_GROUP_BY';
 SET FOREIGN_KEY_CHECKS = 0;
 
 
--- =====================================================================
 -- 3. (RE)CREATE SCHEMA
--- =====================================================================
 DROP DATABASE IF EXISTS airport_booking;
 CREATE DATABASE airport_booking;
 USE airport_booking;
 
--- ---------------------------------------------------------------------
+
 -- Airport
 -- Purpose: Reference list of every airport a flight can depart from or
 --          arrive at.
@@ -43,7 +38,7 @@ USE airport_booking;
 --          so city/country are not repeated on every flight (removes the
 --          airport_code -> city dependency from the flat design). Flight
 --          references it twice, as origin and as destination.
--- ---------------------------------------------------------------------
+
 CREATE TABLE Airport (
     airport_code  CHAR(3)       NOT NULL,          -- IATA code (natural key)
     name          VARCHAR(100)  NOT NULL,
@@ -52,13 +47,12 @@ CREATE TABLE Airport (
     PRIMARY KEY (airport_code)
 );
 
--- ---------------------------------------------------------------------
 -- Airline
 -- Purpose: Reference list of carriers that operate flights and own aircraft.
 -- What it does: Stores each airline once, keyed by its 2-letter IATA code.
 --          Aircraft and Flight both reference it, so an airline name is
 --          changed in one place only.
--- ---------------------------------------------------------------------
+
 CREATE TABLE Airline (
     airline_code  CHAR(2)       NOT NULL,          -- IATA code (natural key)
     name          VARCHAR(80)   NOT NULL,
@@ -66,14 +60,13 @@ CREATE TABLE Airline (
     UNIQUE (name)
 );
 
--- ---------------------------------------------------------------------
 -- Aircraft
 -- Purpose: Physical planes owned by an airline, with their seat capacity.
 -- What it does: Supplies the capacity used by the R4 trigger. The
 --          UNIQUE (aircraft_id, airline_code) pair lets Flight use a
 --          composite FK so a flight can only be assigned an aircraft that
 --          belongs to the same airline operating it.
--- ---------------------------------------------------------------------
+
 CREATE TABLE Aircraft (
     aircraft_id   INT           NOT NULL AUTO_INCREMENT,
     airline_code  CHAR(2)       NOT NULL,
@@ -85,7 +78,6 @@ CREATE TABLE Aircraft (
     CHECK (capacity > 0)
 );
 
--- ---------------------------------------------------------------------
 -- Flight
 -- Purpose: One scheduled operation of a flight number on a specific date
 --          and time (e.g., AA3301 on 2026-12-15 06:00).
@@ -95,7 +87,7 @@ CREATE TABLE Aircraft (
 --          duplicate schedule entries. Enforces R1 through CHECK
 --          constraints and records actual times and gate as they become
 --          known (NULL until then). Searched by R5 via the composite index.
--- ---------------------------------------------------------------------
+
 CREATE TABLE Flight (
     flight_id      INT          NOT NULL AUTO_INCREMENT,  -- surrogate: flight numbers repeat daily
     airline_code   CHAR(2)      NOT NULL,
@@ -122,14 +114,14 @@ CREATE TABLE Flight (
     CONSTRAINT chk_flightno  CHECK (flight_number > 0)
 );
 
--- ---------------------------------------------------------------------
+
 -- Passenger
 -- Purpose: People who travel and make bookings.
 -- What it does: Stores identity and contact details once per person.
 --          email is UNIQUE so each account is one person; passport_no is
 --          UNIQUE but nullable because domestic-only travelers may not
 --          have one on file.
--- ---------------------------------------------------------------------
+
 CREATE TABLE Passenger (
     passenger_id  INT           NOT NULL AUTO_INCREMENT,
     first_name    VARCHAR(50)   NOT NULL,
@@ -141,14 +133,13 @@ CREATE TABLE Passenger (
     UNIQUE (passport_no)
 );
 
--- ---------------------------------------------------------------------
 -- Booking
 -- Purpose: A single reservation (itinerary) purchased by one passenger.
 -- What it does: Holds the customer-facing confirmation code (booking_ref),
 --          purchase time, and total price. One passenger can have many
 --          bookings (1:N, R2). The individual flights in the trip are
 --          stored in Segment, not here.
--- ---------------------------------------------------------------------
+
 CREATE TABLE Booking (
     booking_id    INT           NOT NULL AUTO_INCREMENT,
     booking_ref   CHAR(6)       NOT NULL,          -- confirmation code shown to customer
@@ -161,7 +152,7 @@ CREATE TABLE Booking (
     CHECK (total_price >= 0)
 );
 
--- ---------------------------------------------------------------------
+
 -- Segment
 -- Purpose: One leg of a booking (e.g., LBB -> DFW, then DFW -> LAX).
 -- What it does: Resolves the M:N between Booking and Flight (a booking
@@ -169,10 +160,10 @@ CREATE TABLE Booking (
 --          orders the legs within a booking (R2). UNIQUE (flight_id, seat)
 --          guarantees one passenger per seat on a flight (R3), while
 --          allowing multiple NULL seats for passengers who have not picked
---          one yet. Inserts are checked by trg_segment_capacity and moves to
---          another flight by trg_segment_capacity_upd (R4).
---          Deleting a booking cascades to its segments.
--- ---------------------------------------------------------------------
+--          one yet. Inserts, updates, and deletes are checked by the
+--          trg_segment_before_* triggers below (R2 itinerary order, R4
+--          capacity). Deleting a booking cascades to its segments.
+
 CREATE TABLE Segment (
     booking_id    INT           NOT NULL,
     segment_no    TINYINT       NOT NULL,          -- order of legs within a booking
@@ -188,23 +179,24 @@ CREATE TABLE Segment (
     CHECK (fare_class IN ('ECONOMY', 'PREMIUM', 'BUSINESS', 'FIRST'))
 );
 
--- R4: CHECK cannot reference another table, so capacity is enforced by trigger
+-- R2 and R4 need data from other rows/tables, which CHECK cannot read,
+-- so they are enforced by triggers. The checks live in two procedures
+-- so the INSERT and UPDATE triggers share one copy of each rule.
 DELIMITER //
-CREATE TRIGGER trg_segment_capacity
-BEFORE INSERT ON Segment
-FOR EACH ROW
+
+-- R4: adding one more segment to p_flight must not exceed its capacity.
+-- Counts rows already on the flight; on UPDATE the moving row still has
+-- its old flight_id, so it is correctly not counted.
+CREATE PROCEDURE check_capacity(IN p_flight INT)
 BEGIN
     DECLARE booked INT;
     DECLARE cap    INT;
 
-    SELECT COUNT(*) INTO booked
-    FROM Segment
-    WHERE flight_id = NEW.flight_id;
-
-    SELECT a.capacity INTO cap
-    FROM Flight f
-    JOIN Aircraft a ON a.aircraft_id = f.aircraft_id
-    WHERE f.flight_id = NEW.flight_id;
+    SET booked = (SELECT COUNT(*) FROM Segment WHERE flight_id = p_flight);
+    SET cap    = (SELECT a.capacity
+                  FROM Flight f
+                  JOIN Aircraft a ON a.aircraft_id = f.aircraft_id
+                  WHERE f.flight_id = p_flight);
 
     IF booked >= cap THEN
         SIGNAL SQLSTATE '45000'
@@ -212,36 +204,141 @@ BEGIN
     END IF;
 END//
 
--- R4 also applies when an existing segment is moved to a different flight
-CREATE TRIGGER trg_segment_capacity_upd
-BEFORE UPDATE ON Segment
-FOR EACH ROW
+-- R2: leg p_segno of booking p_booking, flying p_flight, must
+--   (a) depart after the booking was made,
+--   (b) follow an existing leg p_segno-1 (numbering has no gaps),
+--   (c) depart from the airport the previous leg arrived at, after it lands,
+--   (d) if a later leg p_segno+1 exists (UPDATE case), connect into it.
+CREATE PROCEDURE check_leg_order(IN p_booking INT, IN p_segno INT, IN p_flight INT)
 BEGIN
-    DECLARE booked INT;
-    DECLARE cap    INT;
+    DECLARE v_origin  CHAR(3);
+    DECLARE v_dest    CHAR(3);
+    DECLARE v_dep     DATETIME;
+    DECLARE v_arr     DATETIME;
+    DECLARE v_booked  DATETIME;
+    DECLARE prev_dest CHAR(3);
+    DECLARE prev_arr  DATETIME;
+    DECLARE next_orig CHAR(3);
+    DECLARE next_dep  DATETIME;
 
-    IF NEW.flight_id <> OLD.flight_id THEN
-        SELECT COUNT(*) INTO booked
-        FROM Segment
-        WHERE flight_id = NEW.flight_id;
+    SELECT origin, dest, sched_dep, sched_arr
+      INTO v_origin, v_dest, v_dep, v_arr
+    FROM Flight WHERE flight_id = p_flight;
 
-        SELECT a.capacity INTO cap
-        FROM Flight f
-        JOIN Aircraft a ON a.aircraft_id = f.aircraft_id
-        WHERE f.flight_id = NEW.flight_id;
+    SET v_booked = (SELECT booked_at FROM Booking WHERE booking_id = p_booking);
 
-        IF booked >= cap THEN
+    IF v_dep <= v_booked THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'R2 violation: flight departs before the booking was made';
+    END IF;
+
+    IF p_segno > 1 THEN
+        IF NOT EXISTS (SELECT 1 FROM Segment
+                       WHERE booking_id = p_booking AND segment_no = p_segno - 1) THEN
             SIGNAL SQLSTATE '45000'
-                SET MESSAGE_TEXT = 'R4 violation: flight is at aircraft capacity';
+                SET MESSAGE_TEXT = 'R2 violation: previous segment missing (segment numbers must be 1..n with no gaps)';
+        END IF;
+
+        SELECT f.dest, f.sched_arr INTO prev_dest, prev_arr
+        FROM Segment s JOIN Flight f ON f.flight_id = s.flight_id
+        WHERE s.booking_id = p_booking AND s.segment_no = p_segno - 1;
+
+        IF v_origin <> prev_dest THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'R2 violation: leg must depart from the airport the previous leg arrives at';
+        END IF;
+        IF v_dep <= prev_arr THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'R2 violation: leg must depart after the previous leg arrives';
+        END IF;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM Segment
+               WHERE booking_id = p_booking AND segment_no = p_segno + 1) THEN
+        SELECT f.origin, f.sched_dep INTO next_orig, next_dep
+        FROM Segment s JOIN Flight f ON f.flight_id = s.flight_id
+        WHERE s.booking_id = p_booking AND s.segment_no = p_segno + 1;
+
+        IF v_dest <> next_orig OR v_arr >= next_dep THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'R2 violation: leg no longer connects to the next leg';
         END IF;
     END IF;
 END//
+
+-- New legs: capacity first (R4), then itinerary order (R2)
+CREATE TRIGGER trg_segment_before_insert
+BEFORE INSERT ON Segment
+FOR EACH ROW
+BEGIN
+    CALL check_capacity(NEW.flight_id);
+    CALL check_leg_order(NEW.booking_id, NEW.segment_no, NEW.flight_id);
+END//
+
+-- Changed legs: an UPDATE must not bypass R4 or R2. Renumbering or moving
+-- a leg to another booking is refused; delete and re-add instead.
+CREATE TRIGGER trg_segment_before_update
+BEFORE UPDATE ON Segment
+FOR EACH ROW
+BEGIN
+    IF NEW.booking_id <> OLD.booking_id OR NEW.segment_no <> OLD.segment_no THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'R2 violation: segments cannot be renumbered or moved; delete and re-add';
+    END IF;
+    IF NEW.flight_id <> OLD.flight_id THEN
+        CALL check_capacity(NEW.flight_id);
+        CALL check_leg_order(NEW.booking_id, NEW.segment_no, NEW.flight_id);
+    END IF;
+END//
+
+-- Removed legs: only the last leg may be dropped (keeps 1..n gap-free), and
+-- never the only leg (a booking keeps at least one segment). Cancelling the
+-- whole trip is DELETE FROM Booking; that cascade does not fire triggers.
+CREATE TRIGGER trg_segment_before_delete
+BEFORE DELETE ON Segment
+FOR EACH ROW
+BEGIN
+    IF EXISTS (SELECT 1 FROM Segment
+               WHERE booking_id = OLD.booking_id AND segment_no > OLD.segment_no) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'R2 violation: only the last segment of a booking can be removed';
+    END IF;
+    IF OLD.segment_no = 1 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'R2 violation: a booking needs at least one segment; delete the booking instead';
+    END IF;
+END//
+
+-- R2 "one or more segments": MySQL has no deferred constraints, so a Booking
+-- row always exists briefly before its first Segment. This procedure creates
+-- both in one transaction: if the first leg is rejected (full flight, taken
+-- seat, ...), the booking is rolled back too, so no empty booking is left.
+CREATE PROCEDURE create_booking(IN p_ref       CHAR(6),
+                                IN p_passenger INT,
+                                IN p_price     DECIMAL(8,2),
+                                IN p_flight    INT,
+                                IN p_seat      VARCHAR(4),
+                                IN p_fare      VARCHAR(10))
+BEGIN
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+    INSERT INTO Booking (booking_ref, passenger_id, total_price)
+    VALUES (p_ref, p_passenger, p_price);
+    INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class)
+    VALUES (LAST_INSERT_ID(), 1, p_flight, p_seat, p_fare);
+    COMMIT;
+END//
+
 DELIMITER ;
 
 
--- =====================================================================
 -- 4. SEED DATA (minimal)
--- =====================================================================
+
 INSERT INTO Airport (airport_code, name, city, country) VALUES
 ('LBB', 'Lubbock Preston Smith International',     'Lubbock',     'USA'),
 ('DFW', 'Dallas/Fort Worth International',          'Dallas',      'USA'),
@@ -301,16 +398,14 @@ INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class) VALUES
 (6, 1, 1, '22F', 'ECONOMY');
 
 
--- =====================================================================
 -- 5. POST-CREATE: INDEXES
--- =====================================================================
+-- 
 -- Serves R5: WHERE origin = ? AND dest = ? AND sched_dep BETWEEN ? AND ?
+
 CREATE INDEX idx_flight_route_date ON Flight (origin, dest, sched_dep);
 
 
--- =====================================================================
 -- 6. VERIFICATION BLOCK
--- =====================================================================
 
 -- Evidence Query 1 (R5): flights from Lubbock to Dallas/Fort Worth on 2026-12-15
 SELECT f.airline_code, f.flight_number, f.origin, f.dest,
@@ -369,14 +464,19 @@ FROM Flight
 WHERE actual_dep IS NULL
 ORDER BY sched_dep;
 
--- ---------------------------------------------------------------------
+-- Integrity check (R2): bookings with no segments (expect an empty result)
+SELECT b.booking_ref
+FROM Booking b
+LEFT JOIN Segment s ON s.booking_id = b.booking_id
+WHERE s.booking_id IS NULL;
+
 -- Constraint demos (commented out so the script runs to completion).
 -- Uncomment one at a time and run to capture the error screenshot.
--- ---------------------------------------------------------------------
 
--- Demo A (R3): seat 14C on flight 3 is already taken -> ERROR 1062 Duplicate entry
+-- Demo A (R3): booking 2 adds a valid DFW -> LAX connection, but seat 14C on
+--         flight 3 is already taken (booking 1) -> ERROR 1062 Duplicate entry '3-14C'
 -- INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class)
--- VALUES (5, 2, 3, '14C', 'ECONOMY');
+-- VALUES (2, 2, 3, '14C', 'ECONOMY');
 
 -- Demo B (R4): flight 2 is at capacity -> ERROR 1644 'R4 violation...'
 -- INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class)
@@ -392,8 +492,29 @@ ORDER BY sched_dep;
 -- INSERT INTO Flight (airline_code, flight_number, aircraft_id, origin, dest, sched_dep, sched_arr)
 -- VALUES ('WN', 777, 2, 'LBB', 'AUS', '2026-12-20 08:00', '2026-12-20 09:10');
 
+-- Demo E (R4 via UPDATE): moving booking 5's leg onto full flight 2
+--         -> ERROR 1644 'R4 violation: flight is at aircraft capacity'
+-- UPDATE Segment SET flight_id = 2 WHERE booking_id = 5 AND segment_no = 1;
 
--- =====================================================================
+-- Demo F (R2 numbering): booking 2 skips segment 2 and adds segment 3
+--         -> ERROR 1644 'R2 violation: previous segment missing ...'
+-- INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class)
+-- VALUES (2, 3, 3, '20A', 'ECONOMY');
+
+-- Demo G (R2 connection): booking 5 lands in AUS but leg 2 departs DFW
+--         -> ERROR 1644 'R2 violation: leg must depart from the airport ...'
+-- INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class)
+-- VALUES (5, 2, 3, '20A', 'ECONOMY');
+
+-- Demo H (R2 one or more): removing booking 2's only leg
+--         -> ERROR 1644 'R2 violation: a booking needs at least one segment ...'
+-- DELETE FROM Segment WHERE booking_id = 2 AND segment_no = 1;
+
+-- Demo I (R2 one or more): create_booking on full flight 2 fails, and the
+--         booking row is rolled back with it (second SELECT returns 0)
+-- CALL create_booking('ZZ9Y8X', 4, 99.00, 2, '3A', 'ECONOMY');
+-- SELECT COUNT(*) FROM Booking WHERE booking_ref = 'ZZ9Y8X';
+
+
 -- 7. SESSION RESTORE
--- =====================================================================
 SET FOREIGN_KEY_CHECKS = 1;
