@@ -6,7 +6,7 @@
 -- Course    : CS 4354 Concepts of Database Systems, Fall 2026
 -- Project   : Airport Booking Database
 -- MySQL     : 8.0.x (8.0.16+ required for CHECK constraint enforcement)
--- Run       : mysql -u <user> -p < TeamName_Project.sql
+-- Run       : mysql -u <user> -p < Group8_Project.sql
 --             (or open in MySQL Workbench and Execute All)
 --
 -- Requirements
@@ -169,7 +169,8 @@ CREATE TABLE Booking (
 --          orders the legs within a booking (R2). UNIQUE (flight_id, seat)
 --          guarantees one passenger per seat on a flight (R3), while
 --          allowing multiple NULL seats for passengers who have not picked
---          one yet. Every insert is checked by trg_segment_capacity (R4).
+--          one yet. Inserts are checked by trg_segment_capacity and moves to
+--          another flight by trg_segment_capacity_upd (R4).
 --          Deleting a booking cascades to its segments.
 -- ---------------------------------------------------------------------
 CREATE TABLE Segment (
@@ -208,6 +209,31 @@ BEGIN
     IF booked >= cap THEN
         SIGNAL SQLSTATE '45000'
             SET MESSAGE_TEXT = 'R4 violation: flight is at aircraft capacity';
+    END IF;
+END//
+
+-- R4 also applies when an existing segment is moved to a different flight
+CREATE TRIGGER trg_segment_capacity_upd
+BEFORE UPDATE ON Segment
+FOR EACH ROW
+BEGIN
+    DECLARE booked INT;
+    DECLARE cap    INT;
+
+    IF NEW.flight_id <> OLD.flight_id THEN
+        SELECT COUNT(*) INTO booked
+        FROM Segment
+        WHERE flight_id = NEW.flight_id;
+
+        SELECT a.capacity INTO cap
+        FROM Flight f
+        JOIN Aircraft a ON a.aircraft_id = f.aircraft_id
+        WHERE f.flight_id = NEW.flight_id;
+
+        IF booked >= cap THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'R4 violation: flight is at aircraft capacity';
+        END IF;
     END IF;
 END//
 DELIMITER ;
@@ -348,7 +374,7 @@ ORDER BY sched_dep;
 -- Uncomment one at a time and run to capture the error screenshot.
 -- ---------------------------------------------------------------------
 
--- Demo A (R3): duplicate seat on flight 2 -> ERROR 1062 Duplicate entry
+-- Demo A (R3): seat 14C on flight 3 is already taken -> ERROR 1062 Duplicate entry
 -- INSERT INTO Segment (booking_id, segment_no, flight_id, seat, fare_class)
 -- VALUES (5, 2, 3, '14C', 'ECONOMY');
 
@@ -361,7 +387,8 @@ ORDER BY sched_dep;
 -- VALUES ('AA', 9999, 2, 'LBB', 'LBB', '2026-12-20 08:00', '2026-12-20 09:00');
 
 -- Demo D: aircraft from another airline -> ERROR 1452 FK constraint fails
---         (run after SET FOREIGN_KEY_CHECKS = 1)
+--         (FK checks are off until section 7, so uncomment both lines)
+-- SET FOREIGN_KEY_CHECKS = 1;
 -- INSERT INTO Flight (airline_code, flight_number, aircraft_id, origin, dest, sched_dep, sched_arr)
 -- VALUES ('WN', 777, 2, 'LBB', 'AUS', '2026-12-20 08:00', '2026-12-20 09:10');
 
