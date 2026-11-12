@@ -1,0 +1,97 @@
+-- Airport Booking Database
+-- Clean MySQL DDL for importing into DrawSQL.
+-- Contains tables, columns, primary keys, unique constraints, and foreign keys.
+-- Stored procedures, triggers, events, sample data, and queries are omitted.
+
+CREATE TABLE Airport (
+    airport_code CHAR(3) NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    city VARCHAR(60) NOT NULL,
+    country VARCHAR(60) NOT NULL,
+    PRIMARY KEY (airport_code)
+);
+
+CREATE TABLE Airline (
+    airline_code CHAR(2) NOT NULL,
+    name VARCHAR(80) NOT NULL,
+    PRIMARY KEY (airline_code),
+    UNIQUE (name)
+);
+
+CREATE TABLE Aircraft (
+    aircraft_id INT NOT NULL AUTO_INCREMENT,
+    airline_code CHAR(2) NOT NULL,
+    model VARCHAR(40) NOT NULL,
+    capacity SMALLINT NOT NULL,
+    PRIMARY KEY (aircraft_id),
+    UNIQUE (aircraft_id, airline_code),
+    FOREIGN KEY (airline_code)
+        REFERENCES Airline (airline_code)
+);
+
+CREATE TABLE Flight (
+    flight_id INT NOT NULL AUTO_INCREMENT,
+    airline_code CHAR(2) NOT NULL,
+    flight_number SMALLINT NOT NULL,
+    aircraft_id INT NOT NULL,
+    origin CHAR(3) NOT NULL,
+    dest CHAR(3) NOT NULL,
+    sched_dep DATETIME NOT NULL,
+    sched_arr DATETIME NOT NULL,
+    actual_dep DATETIME NULL,
+    actual_arr DATETIME NULL,
+    gate VARCHAR(4) NULL,
+    PRIMARY KEY (flight_id),
+    UNIQUE (airline_code, flight_number, sched_dep),
+    FOREIGN KEY (airline_code)
+        REFERENCES Airline (airline_code),
+    FOREIGN KEY (aircraft_id, airline_code)
+        REFERENCES Aircraft (aircraft_id, airline_code),
+    FOREIGN KEY (origin)
+        REFERENCES Airport (airport_code),
+    FOREIGN KEY (dest)
+        REFERENCES Airport (airport_code)
+);
+
+CREATE TABLE Passenger (
+    passenger_id INT NOT NULL AUTO_INCREMENT,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    passport_no VARCHAR(20) NULL,
+    PRIMARY KEY (passenger_id),
+    UNIQUE (email),
+    UNIQUE (passport_no)
+);
+
+CREATE TABLE Booking (
+    booking_id INT NOT NULL AUTO_INCREMENT,
+    booking_ref CHAR(6) NOT NULL,
+    passenger_id INT NOT NULL,
+    booked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    total_price DECIMAL(8,2) NOT NULL,
+    PRIMARY KEY (booking_id),
+    UNIQUE (booking_ref),
+    FOREIGN KEY (passenger_id)
+        REFERENCES Passenger (passenger_id)
+);
+
+CREATE TABLE Segment (
+    booking_id INT NOT NULL,
+    segment_no TINYINT NOT NULL,
+    flight_id INT NOT NULL,
+    seat VARCHAR(4) NULL,
+    fare_class VARCHAR(10) NOT NULL,
+    PRIMARY KEY (booking_id, segment_no),
+    UNIQUE (booking_id, flight_id),
+    UNIQUE (flight_id, seat),
+    FOREIGN KEY (booking_id)
+        REFERENCES Booking (booking_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (flight_id)
+        REFERENCES Flight (flight_id)
+);
+
+-- Search index from the original schema (optional for the ER diagram).
+CREATE INDEX idx_flight_route_date
+    ON Flight (origin, dest, sched_dep);
